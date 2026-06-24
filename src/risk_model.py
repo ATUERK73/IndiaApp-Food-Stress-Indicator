@@ -64,12 +64,26 @@ def vegetation_soil_stress(soil_moisture_anomaly_pct: float, rainfall_anomaly_pc
     return clamp_0_100(0.7 * soil_stress + 0.3 * rain_stress)
 
 
+def wet_bulb_stress_from_temperature(wet_bulb_temperature_c: float) -> float:
+    """Map regional wet-bulb temperature to heuristic heat-humidity stress.
+
+    The 24-32 C range is a transparent modelling assumption, not a universal
+    human-health, livestock or crop-loss threshold.
+    """
+    if wet_bulb_temperature_c <= 24:
+        return 10
+    if wet_bulb_temperature_c >= 32:
+        return 100
+    return clamp_0_100(10 + ((wet_bulb_temperature_c - 24) / 8) * 90)
+
+
 def risk_score(
     monsoon_stress: float,
     enso_stress: float,
     fert_stress: float,
     food_price_stress: float = 25,
     crop_condition_stress: float | None = None,
+    wet_bulb_stress: float | None = None,
 ) -> float:
     if crop_condition_stress is None:
         return clamp_0_100(
@@ -78,12 +92,21 @@ def risk_score(
             + 0.25 * fert_stress
             + 0.10 * food_price_stress
         )
+    if wet_bulb_stress is None:
+        return clamp_0_100(
+            0.30 * monsoon_stress
+            + 0.20 * enso_stress
+            + 0.20 * fert_stress
+            + 0.15 * food_price_stress
+            + 0.15 * crop_condition_stress
+        )
     return clamp_0_100(
-        0.30 * monsoon_stress
-        + 0.20 * enso_stress
-        + 0.20 * fert_stress
-        + 0.15 * food_price_stress
-        + 0.15 * crop_condition_stress
+        0.27 * monsoon_stress
+        + 0.18 * enso_stress
+        + 0.18 * fert_stress
+        + 0.135 * food_price_stress
+        + 0.135 * crop_condition_stress
+        + 0.10 * wet_bulb_stress
     )
 
 

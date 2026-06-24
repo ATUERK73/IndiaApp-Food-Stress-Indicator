@@ -8,6 +8,7 @@ import re
 import numpy as np
 import pandas as pd
 import requests
+from bs4 import BeautifulSoup
 
 IMD_RAINFALL_FILE = os.path.join("data", "imd_kerala_daily.csv")
 INDIA_FERTILIZER_PRICE_FILE = os.path.join("data", "india_fertilizer_prices.csv")
@@ -15,6 +16,7 @@ INDIA_FERTILIZER_PRICE_FILE = os.path.join("data", "india_fertilizer_prices.csv"
 
 NASA_POWER_DAILY_URL = "https://power.larc.nasa.gov/api/temporal/daily/point"
 NOAA_ONI_URL = "https://www.cpc.ncep.noaa.gov/products/analysis_monitoring/ensostuff/ONI_v5.php"
+NOAA_ENSO_DISCUSSION_URL = "https://www.cpc.ncep.noaa.gov/products/analysis_monitoring/enso_advisory/ensodisc.shtml"
 WORLD_BANK_COMMODITY_MONTHLY_XLSX_URL = "https://thedocs.worldbank.org/en/doc/74e8be41ceb20fa0da750cda2f6b9e4e-0050012026/related/CMO-Historical-Data-Monthly.xlsx"
 
 ONI_SEASON_END_MONTH = {
@@ -347,6 +349,68 @@ def oni_table_to_series(oni_table: pd.DataFrame) -> pd.DataFrame:
 def fetch_noaa_oni_series() -> pd.DataFrame:
     """Fetch NOAA CPC ONI values as a chronological three-month-season series."""
     return oni_table_to_series(fetch_noaa_oni())
+
+
+def parse_noaa_enso_outlook(html: str) -> dict:
+    """Extract forward-looking ENSO signals from NOAA's diagnostic discussion."""
+    text = " ".join(BeautifulSoup(html, "html.parser").get_text(" ", strip=True).split())
+    if not text:
+        raise ValueError("NOAA ENSO discussion is empty.")
+
+    issued_match = re.search(
+        r"issued by\s+.*?\s+(\d{1,2}\s+[A-Za-z]+\s+\d{4})\s+ENSO Alert",
+        text,
+        flags=re.IGNORECASE,
+    )
+    status_match = re.search(
+        r"ENSO Alert System Status:\s*(.*?)\s+Synopsis:", text, flags=re.IGNORECASE
+    )
+    weekly_match = re.search(
+        r"latest weekly Ni(?:ñ|n)o-3\.4 index value was\s*\+?(-?\d+(?:\.\d+)?)\s*°C",
+        text,
+        flags=re.IGNORECASE,
+    )
+    probability_match = re.search(
+        r"(\d+)% chance of a very strong El Ni(?:ñ|n)o during\s+(.+?)(?:\s*\[|\s+that\s)",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    synopsis = ""
+    if "Synopsis:" in text:
+        synopsis_tail = text.split("Synopsis:", 1)[1].strip()
+        synopsis = synopsis_tail.split(". ", 1)[0].strip()
+        if synopsis and not synopsis.endswith("."):
+            synopsis += "."
+
+    result = {
+        "issued": issued_match.group(1) if issued_match else None,
+        "alert_status": status_match.group(1).strip() if status_match else None,
+        "synopsis": synopsis or None,
+        "weekly_nino34_c": float(weekly_match.group(1)) if weekly_match else None,
+        "expected_to_strengthen": bool(
+            re.search(r"expected to strengthen", text, flags=re.IGNORECASE)
+        ),
+        "very_strong_probability_pct": (
+            int(probability_match.group(1)) if probability_match else None
+        ),
+        "very_strong_period": (
+            probability_match.group(2).strip(" .") if probability_match else None
+        ),
+        "source_url": NOAA_ENSO_DISCUSSION_URL,
+    }
+    if not any(
+        result[key]
+        for key in ["alert_status", "synopsis", "weekly_nino34_c", "expected_to_strengthen"]
+    ):
+        raise ValueError("Could not parse NOAA ENSO outlook fields.")
+    return result
+
+
+def fetch_noaa_enso_outlook(timeout: int = 30) -> dict:
+    response = requests.get(NOAA_ENSO_DISCUSSION_URL, timeout=timeout)
+    response.raise_for_status()
+    return parse_noaa_enso_outlook(response.text)
 
 
 def build_fertilizer_price_index(price_df: pd.DataFrame) -> pd.DataFrame:

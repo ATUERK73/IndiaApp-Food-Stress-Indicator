@@ -9,6 +9,7 @@ from src.risk_model import (
     risk_label,
     risk_score,
     vegetation_soil_stress,
+    wet_bulb_stress_from_temperature,
 )
 
 
@@ -43,6 +44,18 @@ class RiskModelTests(unittest.TestCase):
     def test_extended_risk_score_accepts_crop_condition(self):
         score = risk_score(20, 20, 20, 20, 100)
         self.assertAlmostEqual(score, 32.0)
+
+    def test_wet_bulb_stress_bounds_and_direction(self):
+        self.assertEqual(wet_bulb_stress_from_temperature(24), 10)
+        self.assertEqual(wet_bulb_stress_from_temperature(32), 100)
+        self.assertLess(
+            wet_bulb_stress_from_temperature(26),
+            wet_bulb_stress_from_temperature(30),
+        )
+
+    def test_six_component_score_uses_wet_bulb_weight(self):
+        score = risk_score(20, 20, 20, 20, 100, 50)
+        self.assertAlmostEqual(score, 33.8)
 
     def test_risk_labels(self):
         self.assertEqual(risk_label(30), "niedrig")

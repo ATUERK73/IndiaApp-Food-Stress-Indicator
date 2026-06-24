@@ -10,6 +10,7 @@ from src.risk_model import (
     monsoon_stress_from_anomaly,
     risk_score,
     vegetation_soil_stress,
+    wet_bulb_stress_from_temperature,
 )
 
 
@@ -51,6 +52,9 @@ def simulate_three_month_forecast(
     import_exposure: float,
     fertilizer_price_ratio: float,
     food_price_stress: float,
+    wet_bulb_temperature_c: float = 24.0,
+    enso_weekly_nino34_c: float | None = None,
+    enso_expected_to_strengthen: bool = False,
     oni_history: pd.DataFrame | None = None,
     fertilizer_history: pd.DataFrame | None = None,
     food_price_history: pd.DataFrame | None = None,
@@ -71,6 +75,7 @@ def simulate_three_month_forecast(
             "soil_persistence": 0.75,
             "food_shift": 0.0,
             "fertilizer_shift": 0.0,
+            "wet_bulb_shift": 0.0,
         },
         "dry": {
             "rain_persistence": 0.92,
@@ -78,6 +83,7 @@ def simulate_three_month_forecast(
             "soil_persistence": 0.85,
             "food_shift": 0.012,
             "fertilizer_shift": 0.008,
+            "wet_bulb_shift": 0.5,
         },
         "favorable": {
             "rain_persistence": 0.58,
@@ -85,6 +91,7 @@ def simulate_three_month_forecast(
             "soil_persistence": 0.62,
             "food_shift": -0.008,
             "fertilizer_shift": -0.005,
+            "wet_bulb_shift": -0.4,
         },
     }
     if scenario not in scenario_parameters:
@@ -100,6 +107,10 @@ def simulate_three_month_forecast(
         freq="MS",
     )
     oni_drift, oni_volatility = _oni_parameters(oni_history)
+    if enso_expected_to_strengthen:
+        # Explicit model translation of NOAA's qualitative forward signal;
+        # this is not an official NOAA monthly ONI forecast.
+        oni_drift = max(oni_drift, 0.15)
     fert_drift, fert_volatility = _recent_log_return_parameters(
         fertilizer_history, "fertilizer_price_index", 0.06
     )
@@ -109,8 +120,12 @@ def simulate_three_month_forecast(
 
     rain = np.full(simulations, float(rainfall_anomaly_pct))
     soil = np.full(simulations, float(soil_moisture_anomaly_pct))
-    oni_paths = np.full(simulations, float(oni))
+    forecast_oni_start = float(oni)
+    if enso_weekly_nino34_c is not None and np.isfinite(enso_weekly_nino34_c):
+        forecast_oni_start = max(forecast_oni_start, float(enso_weekly_nino34_c))
+    oni_paths = np.full(simulations, forecast_oni_start)
     fert_ratio = np.full(simulations, max(0.05, float(fertilizer_price_ratio)))
+    wet_bulb = np.full(simulations, float(wet_bulb_temperature_c))
 
     food_values: list[np.ndarray] = []
     if food_price_history is not None and "food_price_index" in food_price_history:
@@ -150,6 +165,13 @@ def simulate_three_month_forecast(
             + rng.normal(0, 5.0 + horizon, simulations)
         )
         soil = np.clip(soil, -80, 80)
+        wet_bulb = (
+            0.85 * wet_bulb
+            + 0.15 * float(wet_bulb_temperature_c)
+            + params["wet_bulb_shift"]
+            + rng.normal(0, 0.7 + 0.2 * horizon, simulations)
+        )
+        wet_bulb = np.clip(wet_bulb, 15, 38)
 
         oni_paths = 0.92 * oni_paths + oni_drift + rng.normal(
             0, oni_volatility, simulations
@@ -181,8 +203,16 @@ def simulate_three_month_forecast(
         crop = np.array(
             [vegetation_soil_stress(s, r) for s, r in zip(soil, rain)]
         )
+        wet_bulb_stress = np.array(
+            [wet_bulb_stress_from_temperature(value) for value in wet_bulb]
+        )
         scores = np.array(
-            [risk_score(m, e, f, p, c) for m, e, f, p, c in zip(monsoon, enso, fert, food, crop)]
+            [
+                risk_score(m, e, f, p, c, w)
+                for m, e, f, p, c, w in zip(
+                    monsoon, enso, fert, food, crop, wet_bulb_stress
+                )
+            ]
         )
 
         records.append(
@@ -198,9 +228,11 @@ def simulate_three_month_forecast(
                 "prob_critical": float(np.mean(scores > 75)),
                 "monsoon_median": float(np.median(monsoon)),
                 "enso_median": float(np.median(enso)),
+                "oni_value_median": float(np.median(oni_paths)),
                 "fertilizer_median": float(np.median(fert)),
                 "food_price_median": float(np.median(food)),
                 "crop_condition_median": float(np.median(crop)),
+                "wet_bulb_median": float(np.median(wet_bulb_stress)),
             }
         )
     return pd.DataFrame(records)

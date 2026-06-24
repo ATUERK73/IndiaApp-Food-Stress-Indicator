@@ -68,6 +68,30 @@ class ForecastModelTests(unittest.TestCase):
                 pd.Timestamp("2026-06-22"), 0, 0, 0, 0.65, 1, 25, scenario="unknown"
             )
 
+    def test_official_strengthening_signal_raises_oni_projection(self):
+        arguments = dict(
+            reference_date=pd.Timestamp("2026-06-22"),
+            rainfall_anomaly_pct=0,
+            soil_moisture_anomaly_pct=0,
+            oni=0.5,
+            import_exposure=0.65,
+            fertilizer_price_ratio=1,
+            food_price_stress=25,
+            wet_bulb_temperature_c=25,
+            simulations=1000,
+            seed=9,
+        )
+        history_only = simulate_three_month_forecast(**arguments)
+        official = simulate_three_month_forecast(
+            **arguments,
+            enso_weekly_nino34_c=0.7,
+            enso_expected_to_strengthen=True,
+        )
+        self.assertGreater(
+            official.iloc[-1]["oni_value_median"],
+            history_only.iloc[-1]["oni_value_median"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

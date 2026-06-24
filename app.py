@@ -19,6 +19,7 @@ from src.data_sources import (
     fertilizer_price_shock_factor,
     load_india_fertilizer_prices,
     build_monsoon_anomaly,
+    fetch_noaa_enso_outlook,
     fetch_noaa_oni_series,
     latest_oni_value,
     load_imd_rainfall,
@@ -33,6 +34,7 @@ from src.risk_model import (
     risk_label,
     risk_score,
     vegetation_soil_stress,
+    wet_bulb_stress_from_temperature,
 )
 
 st.set_page_config(page_title="India Composite Food Stress Indicator", layout="wide")
@@ -102,6 +104,11 @@ def load_oni():
         if pd.isna(value):
             return 1.0, pd.DataFrame(), "configured fallback value"
         return value, pd.DataFrame(), "NOAA CPC"
+
+
+@st.cache_data(ttl=3600)
+def load_enso_outlook():
+    return fetch_noaa_enso_outlook()
 
 
 def show_oni_history(history: pd.DataFrame) -> None:
@@ -223,6 +230,10 @@ if manual_oni:
     oni_source = "manual scenario input"
 else:
     oni, oni_history, oni_source = load_oni()
+try:
+    enso_outlook = load_enso_outlook() if not manual_oni else {}
+except Exception:
+    enso_outlook = {}
 if not manual_oni:
     st.sidebar.info(f"ONI: {oni:.2f} ({oni_source})")
     if oni_source != "NOAA CPC":
@@ -241,11 +252,13 @@ try:
         raise ValueError("No regional agroclimate rows were returned.")
     regional_rainfall_anomaly = float(regional_df["rainfall_anomaly_pct"].median())
     regional_soil_anomaly = float(regional_df["soil_moisture_anomaly_pct"].median())
+    regional_wet_bulb_temperature = float(regional_df["wet_bulb_max_c"].median())
     regional_source = "NASA POWER regional monitoring points"
 except Exception:
     regional_df = pd.DataFrame()
     regional_rainfall_anomaly = latest_anomaly if "latest_anomaly" in locals() else 0.0
     regional_soil_anomaly = 0.0
+    regional_wet_bulb_temperature = 24.0
     regional_source = "Unavailable; Kerala rainfall fallback used"
 
 try:
@@ -272,19 +285,39 @@ fert_stress = fertilizer_stress(0.0, import_dep, price_shock)
 crop_condition_stress = vegetation_soil_stress(
     regional_soil_anomaly, regional_rainfall_anomaly
 )
+wet_bulb_stress = wet_bulb_stress_from_temperature(regional_wet_bulb_temperature)
 score = risk_score(
     monsoon_stress,
     enso_stress,
     fert_stress,
     food_price,
     crop_condition_stress,
+    wet_bulb_stress,
 )
 
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Composite Stress Indicator", f"{score:.0f}/100", risk_label(score))
-c2.metric("Monsoon Stress", f"{monsoon_stress:.0f}/100", f"{regional_rainfall_anomaly:.1f}% regional median")
-c3.metric("ENSO Stress", f"{enso_stress:.0f}/100", f"ONI {oni:.1f}")
-c4.metric("Fertilizer Stress", f"{fert_stress:.0f}/100", f"Import exposure {import_dep:.2f}")
+c1, c2, c3, c4, c5 = st.columns(5)
+c1.metric(
+    "Composite Stress Indicator", f"{score:.0f}/100", risk_label(score), delta_color="off"
+)
+c2.metric(
+    "Monsoon Stress",
+    f"{monsoon_stress:.0f}/100",
+    f"{regional_rainfall_anomaly:.1f}% regional median",
+    delta_color="off",
+)
+c3.metric("ENSO Stress", f"{enso_stress:.0f}/100", f"ONI {oni:.1f}", delta_color="off")
+c4.metric(
+    "Fertilizer Stress",
+    f"{fert_stress:.0f}/100",
+    f"Import exposure {import_dep:.2f}",
+    delta_color="off",
+)
+c5.metric(
+    "Wet-bulb Stress",
+    f"{wet_bulb_stress:.0f}/100",
+    f"{regional_wet_bulb_temperature:.1f} °C regional median max",
+    delta_color="off",
+)
 st.caption(
     f"Rainfall source: {rainfall_source}. ONI source: {oni_source}. "
     f"Regional source: {regional_source}. Food-price source: {food_price_source}. "
@@ -365,10 +398,11 @@ else:
     wet_bulb_mean = float(regional_df["wet_bulb_mean_c"].median())
     wet_bulb_max = float(regional_df["wet_bulb_max_c"].max())
     wet_bulb_anomaly = float(regional_df["wet_bulb_anomaly_c"].median())
-    wb1, wb2, wb3 = st.columns(3)
+    wb1, wb2, wb3, wb4 = st.columns(4)
     wb1.metric("Regional median wet-bulb", f"{wet_bulb_mean:.1f} °C")
     wb2.metric("Highest regional daily value", f"{wet_bulb_max:.1f} °C")
     wb3.metric("Median anomaly vs baseline", f"{wet_bulb_anomaly:+.1f} °C")
+    wb4.metric("Composite component stress", f"{wet_bulb_stress:.0f}/100")
 
     wet_bulb_chart_df = regional_df.sort_values("wet_bulb_max_c", ascending=False)
     st.plotly_chart(
@@ -389,9 +423,10 @@ else:
     )
 st.caption(
     "Wet-bulb temperature is estimated from NASA POWER 2 m air temperature and relative humidity "
-    "using the Stull approximation. It is not WBGT, a weather-station measurement, or currently a "
-    "component of the Composite Stress Indicator. The ≥28 °C count is descriptive, not a universal "
-    "health or crop-loss threshold."
+    "using the Stull approximation. It is not WBGT or a weather-station measurement. "
+    "Wet-bulb stress contributes 10% to the Composite Stress Indicator, using the median of regional "
+    "daily maxima. The 24-32 °C mapping and the ≥28 °C count are heuristic modelling assumptions, "
+    "not universal health or crop-loss thresholds."
 )
 
 with st.expander("What is ENSO and where does the ONI come from?", expanded=False):
@@ -420,13 +455,49 @@ with st.expander("What is ENSO and where does the ONI come from?", expanded=Fals
             "Shading marks the ±0.5 °C oceanic thresholds."
         )
 
+st.subheader("NOAA forward ENSO outlook")
+if enso_outlook:
+    outlook_c1, outlook_c2, outlook_c3 = st.columns(3)
+    outlook_c1.metric("Alert status", enso_outlook.get("alert_status") or "Not stated")
+    weekly_nino34 = enso_outlook.get("weekly_nino34_c")
+    outlook_c2.metric(
+        "Latest weekly Niño-3.4",
+        f"{weekly_nino34:+.1f} °C" if weekly_nino34 is not None else "Not stated",
+        delta_color="off",
+    )
+    very_strong_probability = enso_outlook.get("very_strong_probability_pct")
+    very_strong_period = enso_outlook.get("very_strong_period") or "forecast period"
+    outlook_c3.metric(
+        f"Very strong chance ({very_strong_period})",
+        f"{very_strong_probability}%" if very_strong_probability is not None else "Not stated",
+        delta_color="off",
+    )
+    st.info(enso_outlook.get("synopsis") or "NOAA forward outlook loaded.")
+    st.caption(
+        f"Issued {enso_outlook.get('issued') or 'date not parsed'}; refreshed at most hourly. "
+        "The weekly index is a newer signal than the three-month ONI. "
+        f"[Source: NOAA CPC]({enso_outlook.get('source_url')})"
+    )
+else:
+    st.warning(
+        "The live NOAA forward ENSO outlook could not be loaded. "
+        "The forecast uses ONI history only."
+    )
+
 components = pd.DataFrame({
-    "Component": ["Monsoon", "ENSO", "Fertilizer", "Food Price", "Crop Condition"],
-    "Stress": [monsoon_stress, enso_stress, fert_stress, food_price, crop_condition_stress],
-    "Weight": [0.30, 0.20, 0.20, 0.15, 0.15],
+    "Component": ["Monsoon", "ENSO", "Fertilizer", "Food Price", "Crop Condition", "Wet-bulb Heat"],
+    "Stress": [monsoon_stress, enso_stress, fert_stress, food_price, crop_condition_stress, wet_bulb_stress],
+    "Weight": [0.27, 0.18, 0.18, 0.135, 0.135, 0.10],
 })
 st.plotly_chart(
-    px.bar(components, x="Component", y="Stress", text="Stress", title="Indicator components"),
+    px.bar(
+        components,
+        x="Component",
+        y="Stress",
+        text="Stress",
+        title="Indicator components",
+        color_discrete_sequence=["#c0392b"],
+    ),
     use_container_width=True,
 )
 
@@ -439,6 +510,11 @@ forecast_inputs = {
     "import_exposure": import_dep,
     "fertilizer_price_ratio": fertilizer_price_ratio,
     "food_price_stress": food_price,
+    "wet_bulb_temperature_c": regional_wet_bulb_temperature,
+    "enso_weekly_nino34_c": enso_outlook.get("weekly_nino34_c") if enso_outlook else None,
+    "enso_expected_to_strengthen": (
+        bool(enso_outlook.get("expected_to_strengthen")) if enso_outlook else False
+    ),
     "oni_history": oni_history,
     "fertilizer_history": fertilizer_price_df,
     "food_price_history": food_price_df,
@@ -544,10 +620,20 @@ scenario_table = pd.DataFrame({
     "Persistent dryness / price pressure": dry_forecast_df["median"].round(1),
 })
 st.dataframe(scenario_table, use_container_width=True, hide_index=True)
+enso_projection_table = pd.DataFrame({
+    "Month": forecast_df["date"].dt.strftime("%b %Y"),
+    "Projected ONI median": forecast_df["oni_value_median"].round(2),
+    "Projected ENSO stress": forecast_df["enso_median"].round(1),
+})
+st.markdown("**Baseline ENSO projection used by the model**")
+st.dataframe(enso_projection_table, use_container_width=True, hide_index=True)
 st.caption(
     "Each path uses 2,000 Monte Carlo simulations. The baseline now preserves more of the current "
     "weather anomaly; the dry scenario assumes persistent rainfall deficits and additional price pressure, "
-    "while the favorable scenario assumes improving monsoon conditions. The scenarios are alternatives, "
+    "while the favorable scenario assumes improving monsoon conditions. Wet-bulb heat and humidity are "
+    "simulated in every path. When NOAA reports strengthening, the model starts from the newer weekly "
+    "Niño-3.4 signal and applies a minimum +0.15 °C monthly drift. That drift is our conservative "
+    "translation of NOAA's qualitative outlook, not an official NOAA ONI forecast. The scenarios are alternatives, "
     "not assigned probabilities. P10-P90 shading shows baseline model uncertainty and is not a confidence "
     "interval for a food crisis. The model has not yet been operationally validated."
 )
@@ -642,6 +728,8 @@ if not price_df.empty:
         f"ENSO is at ONI {oni:.1f} ({enso_phrase}); and fertilizer prices are {fert_phrase} "
         f"at {fertilizer_price_ratio:.2f}x their five-year median. Staple-food benchmarks changed "
         f"{food_price_change_pct:.1f}% over three months and crop-condition stress is {crop_condition_stress:.0f}/100. "
+        f"Regional wet-bulb heat stress is {wet_bulb_stress:.0f}/100 from a median regional maximum of "
+        f"{regional_wet_bulb_temperature:.1f} °C. "
         f"Overall, this is {risk_detail}. "
         "This indicator is not a probability, forecast or substitute for regional food-security data."
     )

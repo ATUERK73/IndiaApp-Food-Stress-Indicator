@@ -7,6 +7,7 @@ Lebensmittelversorgung in Indien:
 - regionale Regen- und Bodenfeuchte-Anomalien fuer wichtige Agrarregionen
 - regionale Wet-Bulb-Temperatur aus Lufttemperatur und relativer Feuchte
 - ENSO / El Nino ueber den NOAA Oceanic Nino Index (ONI)
+- stuendlich aktualisierter NOAA-ENSO-Ausblick mit Wochenwert, Warnstatus und Staerkeprognose
 - Duengemittelimporte, Preise und ein Hormus-Szenario
 - automatischer Grundnahrungsmittel-Preisindex mit manueller Uebersteuerung
 
@@ -63,13 +64,19 @@ Eintrittswahrscheinlichkeiten und sind keine Wahrscheinlichkeit einer
 Lebensmittelkrise. Das Forecast-Modell ist noch nicht operativ backgetestet oder
 validiert.
 
+Wenn NOAA eine Verstaerkung erwartet, beginnt der ENSO-Forecast beim neueren
+woechentlichen Nino-3.4-Wert (sofern dieser hoeher als der ONI ist) und verwendet
+mindestens +0,15 Grad C Modelldrift pro Monat. Diese Uebersetzung des qualitativen
+NOAA-Ausblicks ist eine explizite Modellannahme und kein offizieller NOAA-ONI-Pfad.
+
 ```text
 Composite Stress Indicator =
-0.30 * MonsoonStress
-+ 0.20 * ENSOStress
-+ 0.20 * FertilizerStress
-+ 0.15 * FoodPriceStress
-+ 0.15 * CropConditionStress
+0.27 * MonsoonStress
++ 0.18 * ENSOStress
++ 0.18 * FertilizerStress
++ 0.135 * FoodPriceStress
++ 0.135 * CropConditionStress
++ 0.10 * WetBulbStress
 ```
 
 `CropConditionStress` kombiniert die Abweichung der Wurzelzonen-Bodenfeuchte mit
@@ -77,7 +84,10 @@ der regionalen Regenabweichung. Der Wert ist ein Proxy und keine NDVI-Messung.
 
 Die Wet-Bulb-Temperatur wird mit der Stull-Naeherung aus NASA-POWER-Tageswerten
 fuer Temperatur in 2 m Hoehe und relative Luftfeuchte berechnet. Sie ist nicht
-gleichbedeutend mit WBGT und beeinflusst den Composite Score derzeit nicht.
+gleichbedeutend mit WBGT. `WetBulbStress` verwendet den Median der regionalen
+Tagesmaxima: Bis 24 Grad C gilt ein Stresswert von 10, ab 32 Grad C ein Wert von
+100, dazwischen wird linear interpoliert. Diese Schwellen sind heuristische
+Modellannahmen und keine universellen Gesundheits- oder Ernteausfallgrenzen.
 
 Die Gewichtungen sind Modellannahmen und derzeit nicht empirisch validiert. Fuer
 operative Nutzung sind unter anderem regionale Ernteertraege, Lagerbestaende,

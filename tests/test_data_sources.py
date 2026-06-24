@@ -8,6 +8,7 @@ from src.data_sources import (
     fertilizer_price_shock_factor,
     load_india_fertilizer_prices,
     oni_table_to_series,
+    parse_noaa_enso_outlook,
     wet_bulb_temperature_c,
 )
 
@@ -66,6 +67,23 @@ class OniSeriesTests(unittest.TestCase):
         self.assertEqual(result.iloc[-1]["date"], pd.Timestamp("2026-01-01"))
         self.assertEqual(result.iloc[-1]["season"], "NDJ")
         self.assertAlmostEqual(result.iloc[-1]["oni"], 0.8)
+
+    def test_parses_forward_noaa_enso_outlook(self):
+        html = """
+        <html><body>
+        issued by CLIMATE PREDICTION CENTER/NCEP/NWS 11 June 2026
+        ENSO Alert System Status: El Niño Advisory
+        Synopsis: El Niño conditions are present and expected to strengthen into winter 2026-27.
+        The latest weekly Niño-3.4 index value was +0.7°C.
+        There is a 63% chance of a very strong El Niño during November-January [Fig. 8]
+        </body></html>
+        """
+        result = parse_noaa_enso_outlook(html)
+        self.assertEqual(result["alert_status"], "El Niño Advisory")
+        self.assertAlmostEqual(result["weekly_nino34_c"], 0.7)
+        self.assertTrue(result["expected_to_strengthen"])
+        self.assertEqual(result["very_strong_probability_pct"], 63)
+        self.assertEqual(result["very_strong_period"], "November-January")
 
 
 class FertilizerPriceTests(unittest.TestCase):
