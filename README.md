@@ -8,8 +8,8 @@ India's food supply:
 - regional wet-bulb temperature derived from air temperature and relative humidity
 - ENSO / El Nino conditions based on NOAA's Oceanic Nino Index (ONI)
 - an hourly refreshed NOAA ENSO outlook with the weekly index, alert status, and strengthening signal
-- fertilizer imports, prices, and a Strait of Hormuz scenario
-- an automatic staple-food price index with a manual override
+- a six-month best-case / worst-case scenario outlook using 2,000 Monte Carlo paths per scenario
+- a probability-weighted ENSO impact simulation using NOAA's stated strengthening probability when available
 
 ## Getting started
 
@@ -22,24 +22,9 @@ streamlit run app.py
 
 - NASA POWER Daily API for rainfall and regional agroclimate data
 - NOAA CPC ONI for ENSO conditions
-- World Bank Pink Sheet for global fertilizer price benchmarks
-- Department of Fertilizers and official Indian publications for import data
-- IndexMundi as a fallback global urea price proxy
-- international rice, wheat, maize, and soybean-oil benchmarks as food-price proxies
 
 The interface labels data as live/local, manual scenario input, or simulated
 fallback data. Simulated data must not be interpreted as current observations.
-
-### Optional Indian fertilizer price dataset
-
-Create `data/india_fertilizer_prices.csv` to display farmer-facing Indian prices
-and maximum retail prices (MRPs). The file requires:
-
-- `fertilizer`, for example `Urea`, `DAP`, `MOP`, or `NPK 10-26-26`
-- `bag_size_kg`
-- `price_inr_per_bag`
-
-Optional columns: `as_of` and `source_note`.
 
 ### Optional IMD dataset
 
@@ -53,28 +38,16 @@ Create `data/imd_kerala_daily.csv`. The file requires:
 The prototype calculates neither a crisis probability nor an official forecast.
 It produces a heuristic Composite Stress Indicator ranging from 0 to 100. Kerala
 is only a regional indicator and is not representative of India as a whole.
-
-The interface also presents an experimental three-month outlook with three
-alternatives: a baseline scenario, persistent dryness and price pressure, and a
-favorable monsoon. Each path simulates 2,000 possible developments in weather,
-ENSO, and prices. The P10-P90 band applies to the baseline scenario and represents
-model uncertainty. The three scenarios have no assigned probabilities and do not
-represent the probability of a food crisis. The forecast model has not yet been
-operationally backtested or validated.
-
-When NOAA expects strengthening, the ENSO forecast starts from the more recent
-weekly Nino-3.4 value, provided it is higher than the ONI, and applies at least
-+0.15 degrees C of model drift per month. This translation of NOAA's qualitative
-outlook is an explicit model assumption, not an official NOAA ONI trajectory.
+The six-month outlook is a scenario stress test, not a prediction.
+The ENSO probability panel is a conditional impact calculation, not an official
+NOAA forecast translation.
 
 ```text
 Composite Stress Indicator =
-0.27 * MonsoonStress
-+ 0.18 * ENSOStress
-+ 0.18 * FertilizerStress
-+ 0.135 * FoodPriceStress
-+ 0.135 * CropConditionStress
-+ 0.10 * WetBulbStress
+0.35 * MonsoonStress
++ 0.25 * ENSOStress
++ 0.25 * CropConditionStress
++ 0.15 * WetBulbStress
 ```
 
 `CropConditionStress` combines the root-zone soil-moisture anomaly with the

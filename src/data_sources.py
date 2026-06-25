@@ -18,6 +18,17 @@ NASA_POWER_DAILY_URL = "https://power.larc.nasa.gov/api/temporal/daily/point"
 NOAA_ONI_URL = "https://www.cpc.ncep.noaa.gov/products/analysis_monitoring/ensostuff/ONI_v5.php"
 NOAA_ENSO_DISCUSSION_URL = "https://www.cpc.ncep.noaa.gov/products/analysis_monitoring/enso_advisory/ensodisc.shtml"
 WORLD_BANK_COMMODITY_MONTHLY_XLSX_URL = "https://thedocs.worldbank.org/en/doc/74e8be41ceb20fa0da750cda2f6b9e4e-0050012026/related/CMO-Historical-Data-Monthly.xlsx"
+UPAG_API_BASE_URL = "https://data.upag.gov.in"
+
+UPAG_FOOD_CROPS = ["Rice", "Wheat", "Gram Dal"]
+UPAG_FERTILIZER_HS_CODES = [
+    "31021000",  # Urea
+    "31022100",  # Ammonium sulphate
+    "31023000",  # Ammonium nitrate
+    "3103",      # Phosphatic fertilizers
+    "3104",      # Potassic fertilizers
+    "3105",      # Mixed/mineral fertilizers
+]
 
 ONI_SEASON_END_MONTH = {
     "DJF": 2, "JFM": 3, "FMA": 4, "MAM": 5, "AMJ": 6, "MJJ": 7,
@@ -58,16 +69,6 @@ FERTILIZER_PRICE_COMPONENTS = {
     "potassium_chloride_usd_per_ton": 0.20,
 }
 
-INDIA_FERTILIZER_PRICE_FALLBACK = [
-    {
-        "fertilizer": "Urea",
-        "bag_size_kg": 45.0,
-        "price_inr_per_bag": 266.50,
-        "source_note": "configured fallback; regulated Indian farmer MRP commonly cited for a 45 kg bag",
-    },
-]
-
-
 def wet_bulb_temperature_c(
     air_temperature_c: float | np.ndarray | pd.Series,
     relative_humidity_pct: float | np.ndarray | pd.Series,
@@ -90,13 +91,22 @@ def wet_bulb_temperature_c(
 
 
 def load_india_fertilizer_prices(file_path: str = INDIA_FERTILIZER_PRICE_FILE) -> tuple[pd.DataFrame, str]:
-    """Load Indian farmer fertilizer prices from a local CSV, with a clearly marked fallback."""
+    """Load Indian farmer fertilizer prices from a local CSV when one is available."""
     if os.path.exists(file_path):
         df = pd.read_csv(file_path)
         source = file_path
     else:
-        df = pd.DataFrame(INDIA_FERTILIZER_PRICE_FALLBACK)
-        source = "configured fallback values"
+        return (
+            pd.DataFrame(
+                columns=[
+                    "fertilizer",
+                    "bag_size_kg",
+                    "price_inr_per_bag",
+                    "price_inr_per_kg",
+                ]
+            ),
+            "No local Indian fertilizer price file",
+        )
 
     required_columns = {"fertilizer", "bag_size_kg", "price_inr_per_bag"}
     missing_columns = required_columns.difference(df.columns)
@@ -112,6 +122,181 @@ def load_india_fertilizer_prices(file_path: str = INDIA_FERTILIZER_PRICE_FILE) -
     if "as_of" in df.columns:
         df["as_of"] = pd.to_datetime(df["as_of"], errors="coerce").dt.date
     return df.reset_index(drop=True), source
+
+
+def upag_credentials_available() -> bool:
+    return bool(os.getenv("UPAG_USERNAME") and os.getenv("UPAG_PASSWORD"))
+
+
+def fetch_upag_access_token(timeout: int = 30) -> str:
+    username = os.getenv("UPAG_USERNAME")
+    password = os.getenv("UPAG_PASSWORD")
+    if not username or not password:
+        raise ValueError("UPAg credentials are not configured.")
+
+    response = requests.post(
+        f"{UPAG_API_BASE_URL}/v1/upag/api-data-share/login",
+        data={"username": username, "password": password},
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    token = response.json().get("access_token")
+    if not token:
+        raise ValueError("UPAg login did not return an access token.")
+    return token
+
+
+def fetch_upag_source(
+    source_name: str,
+    source_input: dict,
+    token: str | None = None,
+    timeout: int = 45,
+) -> pd.DataFrame:
+    """Fetch a UPAg data-share source as a DataFrame.
+
+    UPAg requires OAuth credentials. The app passes a cached token when possible;
+    direct calls can omit token and let this helper authenticate from environment
+    variables.
+    """
+    access_token = token or fetch_upag_access_token(timeout=timeout)
+    payload = {
+        "source_input_object": {
+            "limit": 10000,
+            "offset": 0,
+            "source_name": source_name,
+            **source_input,
+        }
+    }
+    response = requests.post(
+        f"{UPAG_API_BASE_URL}/v1/upag/api-data-share/sources/{source_name}",
+        json=payload,
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    body = response.json()
+    if body.get("status") != "Success":
+        raise ValueError(body.get("message") or body.get("error") or f"UPAg {source_name} request failed.")
+    return pd.DataFrame(body.get("data", []))
+
+
+def fetch_upag_doca_food_prices(years: list[int], token: str | None = None) -> pd.DataFrame:
+    frames = []
+    for year in years:
+        frame = fetch_upag_source("doca", {"year": [str(year)]}, token=token)
+        if not frame.empty:
+            frames.append(frame)
+    if not frames:
+        return pd.DataFrame(columns=["date", "food_price_index"])
+
+    df = pd.concat(frames, ignore_index=True)
+    df["date"] = pd.to_datetime(df.get("CalendarDay"), errors="coerce")
+    df["RetailPrice"] = pd.to_numeric(df.get("RetailPrice"), errors="coerce")
+    if "Crop" not in df:
+        return pd.DataFrame(columns=["date", "food_price_index"])
+    df["Crop"] = df["Crop"].astype(str)
+    df = df.dropna(subset=["date", "RetailPrice"])
+    df = df[df["Crop"].str.lower().isin({crop.lower() for crop in UPAG_FOOD_CROPS})]
+    if df.empty:
+        return pd.DataFrame(columns=["date", "food_price_index"])
+
+    df["month"] = df["date"].dt.to_period("M").dt.to_timestamp()
+    monthly = df.groupby(["month", "Crop"], as_index=False)["RetailPrice"].mean()
+    indexed_frames = []
+    for _, crop_frame in monthly.groupby("Crop"):
+        crop_frame = crop_frame.sort_values("month").copy()
+        first_price = crop_frame["RetailPrice"].iloc[0]
+        if first_price > 0:
+            crop_frame["index"] = 100 * crop_frame["RetailPrice"] / first_price
+            indexed_frames.append(crop_frame)
+    if not indexed_frames:
+        return pd.DataFrame(columns=["date", "food_price_index"])
+
+    combined = pd.concat(indexed_frames, ignore_index=True)
+    return (
+        combined.groupby("month", as_index=False)["index"]
+        .mean()
+        .rename(columns={"month": "date", "index": "food_price_index"})
+        .sort_values("date")
+        .reset_index(drop=True)
+    )
+
+
+def fetch_upag_fertilizer_import_exposure(years: list[int], token: str | None = None) -> tuple[float, pd.DataFrame, str]:
+    frames = []
+    for year in years:
+        frame = fetch_upag_source(
+            "dgcis",
+            {
+                "year": [str(year)],
+                "HsCode": UPAG_FERTILIZER_HS_CODES,
+                "export_import_type": ["import"],
+            },
+            token=token,
+        )
+        if not frame.empty:
+            frames.append(frame)
+    if not frames:
+        return 0.65, pd.DataFrame(), "UPAg DGCIS returned no fertilizer import rows"
+
+    df = pd.concat(frames, ignore_index=True)
+    df["Year"] = pd.to_numeric(df.get("Year"), errors="coerce")
+    df["Quantity"] = pd.to_numeric(df.get("Quantity"), errors="coerce")
+    df["ValueInUSD"] = pd.to_numeric(df.get("ValueInUSD"), errors="coerce")
+    df = df.dropna(subset=["Year"])
+    if df.empty:
+        return 0.65, pd.DataFrame(), "UPAg DGCIS fertilizer import rows were not numeric"
+
+    annual = (
+        df.groupby("Year", as_index=False)
+        .agg(import_quantity=("Quantity", "sum"), import_value_usd=("ValueInUSD", "sum"))
+        .sort_values("Year")
+        .reset_index(drop=True)
+    )
+    latest_quantity = float(annual["import_quantity"].dropna().iloc[-1]) if annual["import_quantity"].notna().any() else 0.0
+    reference_quantity = float(annual["import_quantity"].dropna().max()) if annual["import_quantity"].notna().any() else 0.0
+    if reference_quantity <= 0:
+        return 0.65, annual, "UPAg DGCIS fertilizer imports loaded, but quantity was unavailable"
+    exposure = float(np.clip(latest_quantity / reference_quantity, 0.20, 0.95))
+    return exposure, annual, "UPAg DGCIS fertilizer import quantity proxy"
+
+
+def fetch_upag_fci_stock(years: list[int], token: str | None = None) -> pd.DataFrame:
+    frames = []
+    for year in years:
+        frame = fetch_upag_source("fci_stock", {"year": [str(year)]}, token=token)
+        if not frame.empty:
+            frames.append(frame)
+    if not frames:
+        return pd.DataFrame()
+    df = pd.concat(frames, ignore_index=True)
+    df["Stock"] = pd.to_numeric(df.get("Stock"), errors="coerce")
+    df["BufferNorm"] = pd.to_numeric(df.get("BufferNorm"), errors="coerce")
+    df["Year"] = pd.to_numeric(df.get("Year"), errors="coerce")
+    if "MonthYear" in df:
+        df["date"] = pd.to_datetime(df["MonthYear"].astype(str), format="%b-%y", errors="coerce")
+    else:
+        df["date"] = pd.NaT
+    return df.dropna(subset=["Stock"]).sort_values(["Year", "date"], na_position="last").reset_index(drop=True)
+
+
+def fetch_upag_crop_yield(years: list[int], token: str | None = None) -> pd.DataFrame:
+    frames = []
+    for year in years:
+        frame = fetch_upag_source(
+            "dafw_state",
+            {"year": [str(year)], "location_granularity": "state"},
+            token=token,
+        )
+        if not frame.empty:
+            frames.append(frame)
+    if not frames:
+        return pd.DataFrame()
+    df = pd.concat(frames, ignore_index=True)
+    for column in ["CropArea", "CropProduction", "CropYield"]:
+        if column in df:
+            df[column] = pd.to_numeric(df[column], errors="coerce")
+    return df.reset_index(drop=True)
 
 
 def fetch_nasa_power_precipitation(
